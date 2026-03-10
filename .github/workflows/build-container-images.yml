@@ -1,0 +1,192 @@
+name: Build and push containers to GHCR
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  pipeline:
+
+      name: Build and push ubuntu-${{ matrix.ubuntu_version }}
+      runs-on: [self-hosted]
+      env:
+        USER_NAME: builds
+        USER_UID: '1001'
+        USER_GID: '1001'
+
+      strategy:
+        fail-fast: false
+        matrix:
+          ubuntu_version: ['20.04', '22.04', '24.04']
+
+
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v6
+          with:
+            clean: ${{ runner.environment != 'self-hosted' }}
+            fetch-depth: 1
+            ref: ${{ github.ref_name }}
+
+        - name: Linux Environment step summary
+          if: runner.os == 'Linux'
+          shell: bash
+          run: |
+            # Print current username
+            username="$(whoami)"
+            echo "Current user: $username"
+
+            # Ensure GITHUB_STEP_SUMMARY is available
+            summaryPath="$GITHUB_STEP_SUMMARY"
+            if [ -z "$summaryPath" ]; then
+              echo "GITHUB_STEP_SUMMARY is not set; skipping summary write."
+              exit 0
+            fi
+
+            # Write heading and username
+            {
+              echo "### Current user"
+              echo ""
+              echo "$username"
+              echo ""
+              echo "| key | value |"
+              echo "|---|---|"
+            } >> "$summaryPath"
+
+            # Helper to sanitize values:
+            sanitize() {
+              local s="$1"
+              s="${s//$'\n'/ }"      # replace newlines with spaces
+              s="${s//|/\\|}"        # escape pipes
+              echo "$s"
+            }
+
+            # Append sorted environment variables as table rows
+            env | sort | while IFS='=' read -r key value; do
+              k="$(sanitize "$key")"
+              v="$(sanitize "$value")"
+              echo "| $k | $v |" >> "$summaryPath"
+            done
+
+            echo "Environment table appended to $summaryPath"
+
+        - name: Windows Environment step summary
+          if: runner.os == 'Windows'
+          shell: pwsh
+          run: |
+            # ${{ github.action }}
+            # Print current username to the job log
+            $username = $env:USERNAME
+            Write-Host "Current user: $username"
+
+            # Ensure GITHUB_STEP_SUMMARY is available
+            $summaryPath = $env:GITHUB_STEP_SUMMARY
+            if (-not $summaryPath) {
+              Write-Host "GITHUB_STEP_SUMMARY is not set; skipping summary write."
+              exit 0
+            }
+
+            # Write a small heading and the username to the step summary
+            Add-Content -Path $summaryPath -Value "### Current user"
+            Add-Content -Path $summaryPath -Value ""
+            Add-Content -Path $summaryPath -Value $username
+            Add-Content -Path $summaryPath -Value ""
+
+            # Table header required by the user
+            $header = "| key | value |`n|---|---|"
+            Add-Content -Path $summaryPath -Value $header
+
+            # Helper to sanitize values so the Markdown table stays valid:
+            # - replace pipe characters with escaped pipe (\|)
+            # - collapse newlines into spaces
+            function Sanitize([string]$s) {
+              if ($null -eq $s) { return "" }
+              $noNewlines = [regex]::Replace($s, '\r\n?|\n', ' ')
+              return ($noNewlines -replace '\|','\\|')
+            }
+
+            # Append sorted environment variables as table rows
+            Get-ChildItem Env: |
+              Sort-Object Name |
+              ForEach-Object {
+                $k = Sanitize $_.Name
+                $v = Sanitize $_.Value
+                Add-Content -Path $summaryPath -Value ("| {0} | {1} |" -f $k, $v)
+              }
+
+            Write-Host "Environment table appended to $summaryPath"
+
+        - name: Set up Docker
+          if: runner.os == 'Windows'
+          uses: docker/setup-docker-action@v5
+
+        - name: Log in to registry (optional)
+          uses: docker/login-action@v4
+          with:
+            registry: ghcr.io
+            username: ${{ github.actor }}
+            password: ${{ secrets.GITHUB_TOKEN }}
+
+        - name: Set up Docker Buildx
+          if: runner.os == 'Windows'
+          uses: docker/setup-buildx-action@v4
+
+        - name: Set up QEMU (optional, for emulation)
+          if: runner.os == 'Linux'
+          uses: docker/setup-qemu-action@v4
+
+        - name: Build image with Buildx
+          uses: docker/build-push-action@v7
+          env:
+            IMAGE_NAME: ghcr.io/${{ github.repository }}/ubuntu-${{ matrix.ubuntu_version }}
+            IMAGE_TAG: ${{ github.sha }}
+          with:
+            push: true
+            file: .github/workflows/build-container-image.dockerfile
+            platforms: linux/amd64,linux/arm64
+            provenance: mode=max
+            sbom: true
+            build-args: |
+              UBUNTU_VERSION=${{ matrix.ubuntu_version }}
+              USER_NAME=${{ env.USER_NAME }}
+              USER_UID=${{ env.USER_UID }}
+              USER_GID=${{ env.USER_GID }}
+            labels: |
+              org.opencontainers.image.title=project-os
+              org.opencontainers.image.description=Ubuntu base image for project-os
+              org.opencontainers.image.url=https://github.com/${{ github.repository }}
+              org.opencontainers.image.source=https://github.com/${{ github.repository }}
+              org.opencontainers.image.version=${{ env.IMAGE_TAG }}
+              org.opencontainers.image.revision=${{ github.sha }}
+              org.opencontainers.image.licenses=MIT
+              org.opencontainers.image.vendor=Ubuntu
+              org.opencontainers.image.base.name=ubuntu:${{ matrix.ubuntu_version }}
+            tags: |
+              ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+              ${{ env.IMAGE_NAME }}:latest
+
+        - name: Remove old container images
+          if: success()
+          uses: actions/delete-package-versions@v5
+          with:
+            package-name: project-os/ubuntu-${{ matrix.ubuntu_version }}
+            package-type: container
+            min-versions-to-keep: 2
+            token: ${{ secrets.GITHUB_TOKEN }}
+
+        # - name: Docker cleanup
+        #   run: |
+        #     # ${{ github.action }}
+        #     docker system prune -f

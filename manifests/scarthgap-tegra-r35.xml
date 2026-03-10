@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest>
+  <!--
+    Google repo tool install (Linux):
+
+    Option 1: distro package (if available)
+      sudo apt-get update && sudo apt-get install -y repo
+
+    Option 2: upstream launcher script
+      mkdir -p "$HOME/.local/bin"
+      curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/.local/bin/repo"
+      chmod a+x "$HOME/.local/bin/repo"
+      export PATH="$HOME/.local/bin:$PATH"
+
+    Initialize/sync with this manifest:
+      cd <project-root>
+      repo init -u http://github.com/gaknoid/project-os -m manifests/scarthgap-tegra-r35.xml.xml -b main
+      ln -sfr .repo/manifests/.gitignore .gitignore
+      ln -sfr .repo/manifests/.vscode .vscode
+      repo sync -j$(nproc)
+
+    Initialize OpenEmbedded using meta-project template:
+      cd <project-root>
+      export BB_ENV_PASSTHROUGH_ADDITIONS="$BB_ENV_PASSTHROUGH_ADDITIONS MACHINE"
+      export MACHINE=machine-jetson-orin-nano-devkit-nvme
+      TEMPLATECONF=$(pwd)/.repo/manifests/meta-project/conf/templates/default \
+      . layers/openembedded-core/oe-init-build-env build
+
+    Example first build target:
+      bitbake core-image-project
+  -->
+  <remote name="yocto" alias="origin" fetch="https://git.yoctoproject.org/" />
+  <remote name="github" alias="origin" fetch="https://github.com/" />
+  <remote name="oe" alias="origin" fetch="https://git.openembedded.org/" />
+
+  <default sync-j="4" sync-c="false" sync-s="false" sync-tags="false" />
+
+  <project name="meta-openembedded" path="layers/meta-openembedded" remote="oe" revision="scarthgap" upstream="scarthgap"/>
+  <project name="meta-security" path="layers/meta-security" remote="yocto" revision="scarthgap" upstream="scarthgap"/>
+  <project name="meta-virtualization" path="layers/meta-virtualization" remote="yocto" revision="scarthgap" upstream="scarthgap"/>
+  <project name="uptane/meta-updater" path="layers/meta-updater" remote="github" revision="scarthgap" upstream="scarthgap"/>
+  <project name="kraj/meta-clang" path="layers/meta-clang" remote="github" revision="scarthgap" upstream="scarthgap"/>
+  <project name="meta-intel" path="layers/meta-intel" remote="yocto" revision="scarthgap" upstream="scarthgap"/>
+  <project name="agherzan/meta-raspberrypi" path="layers/meta-raspberrypi" remote="github" revision="scarthgap" upstream="scarthgap"/>
+  <project name="OE4T/meta-tegra" path="layers/meta-tegra" remote="github" revision="scarthgap-l4t-r35.x" upstream="scarthgap-l4t-r35.x"/>
+  <project name="bitbake" path="layers/bitbake" remote="oe" revision="2.8" upstream="2.8"/>
+  <project name="openembedded-core" path="layers/openembedded-core" remote="oe" revision="scarthgap" upstream="scarthgap"/>
+  <project name="meta-yocto" path="layers/meta-yocto" remote="yocto" revision="scarthgap" upstream="scarthgap"/>
+  <!-- <project name="meta-mingw" path="layers/meta-mingw" remote="yocto" revision="scarthgap" upstream="scarthgap"/> -->
+  <!-- <project name="meta-rust/meta-rust" path="layers/meta-rust" remote="github" revision="scarthgap" upstream="scarthgap"/> -->
+
+</manifest>

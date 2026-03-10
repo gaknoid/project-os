@@ -1,0 +1,25 @@
+name: Bitbake Build
+description: Initialize Yocto build environment and run bitbake for specified target
+
+inputs:
+  workspace:
+    description: Workspace directory to run the bitbake build in
+    required: false
+    default: ${{ github.workspace }}
+  target:
+    description: BitBake target to build
+    required: true
+  template:
+    description: Template name under layers/meta-project/conf/templates
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run bitbake build
+      shell: bash
+      env:
+        WORKSPACE: ${{ inputs.workspace }}
+        BITBAKE_TARGET: ${{ inputs.target }}
+        BITBAKE_TEMPLATE: ${{ inputs.template }}
+      run: $GITHUB_ACTION_PATH/action.sh

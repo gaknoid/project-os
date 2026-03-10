@@ -1,0 +1,94 @@
+name: Build core-image-project
+
+on:
+  workflow_dispatch:
+    inputs:
+      template:
+        description: Template name under layers/meta-project/conf/templates, or all
+        required: true
+        type: choice
+        options:
+          - all
+          - machine-intel-corei7-64
+          - machine-qemux86-64
+          - machine-qemuarm64
+          - machine-raspberrypi5
+          - machine-jetson-orin-nano-devkit-nvme
+        default: all
+      release_tag:
+        description: Optional draft release tag (example v1.2.3). Leave empty to skip release.
+        required: false
+        type: string
+      release_title:
+        description: Optional draft release title
+        required: false
+        type: string
+  # push:
+  #   paths:
+  #     - ".github/workflows/build-core-image-project.yml"
+  #     - "manifests/**"
+  #     - "layers/meta-project/**"
+  # pull_request:
+  #   paths:
+  #     - ".github/workflows/build-core-image-project.yml"
+  #     - "manifests/**"
+  #     - "layers/meta-project/**"
+
+permissions:
+  contents: write
+  packages: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: Build core-image-project (${{ matrix.template }})
+    runs-on: self-hosted
+    strategy:
+      fail-fast: false
+      matrix:
+        template: ${{ fromJson(inputs.template == 'all' && '["machine-intel-corei7-64","machine-qemux86-64","machine-qemuarm64","machine-raspberrypi5","machine-jetson-orin-nano-devkit-nvme"]' || format('["{0}"]', inputs.template)) }}
+    container:
+      image: ghcr.io/${{ github.repository }}/ubuntu-20.04:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --userns=host --user=972:972
+
+    steps:
+      - name: Fail if branch is not main
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        run: |
+          echo "This workflow should not be triggered with workflow_dispatch on a branch other than main"
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          clean: ${{ runner.environment != 'self-hosted' }}
+          fetch-depth: 1
+          ref: ${{ github.ref_name }}
+
+      - name: Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.GH_TS_AUTHKEY }}
+          statedir: /tmp/tailscale-state/${{github.actor}}-${{ github.run_id }}
+          version: latest
+          ping: ${{ secrets.GH_TS_PING_HOST }}
+
+      - name: Build image and optionally draft release
+        if: ${{ success() || failure() }}
+        uses: ./.github/actions/core-image-build
+        with:
+          workspace: ${{ github.workspace }}
+          manifest_uri: ${{ github.server_url }}/${{ github.repository }}
+          manifest_file: manifests/default.xml
+          manifest_branch: ${{ github.ref_name }}
+          target: core-image-project
+          template: ${{ matrix.template }}
+          release_tag: ${{ inputs.release_tag }}
+          release_title: ${{ inputs.release_title }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

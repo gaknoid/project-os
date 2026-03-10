@@ -1,0 +1,167 @@
+name: Build core-image-minimal
+
+on:
+  workflow_dispatch:
+    inputs:
+      template:
+        description: Template name under layers/meta-project/conf/templates, or all
+        required: true
+        type: choice
+        options:
+          - all
+          - machine-qemux86-64
+          - machine-qemuarm64
+        default: all
+      release_tag:
+        description: Optional draft release tag (example v1.2.3). Leave empty to skip release.
+        required: false
+        type: string
+      release_title:
+        description: Optional draft release title
+        required: false
+        type: string
+  # push:
+  #   paths:
+  #     - ".github/workflows/build-core-image-minimal.yml"
+  #     - "manifests/**"
+  #     - "layers/meta-project/**"
+  # pull_request:
+  #   paths:
+  #     - ".github/workflows/build-core-image-minimal.yml"
+  #     - "manifests/**"
+  #     - "layers/meta-project/**"
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  verify-image:
+    name: Verify image attestation
+    runs-on: [self-hosted,linux]
+    steps:
+      - name: Install cosign into runner tools
+        shell: bash
+        run: |
+          # ${{ github.action }}
+          set -euo pipefail
+          # Ensure the tools directory exists
+          mkdir -p "$RUNNER_TOOL_CACHE/bin"
+          # Download cosign
+          curl -sSL \
+            https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 \
+            -o "$RUNNER_TOOL_CACHE/bin/cosign"
+          chmod +x "$RUNNER_TOOL_CACHE/bin/cosign"
+          # Add to PATH for this job
+          echo "$RUNNER_TOOL_CACHE/bin" >> "$GITHUB_PATH"
+          echo "Cosign installed at $RUNNER_TOOL_CACHE/bin/cosign"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify container provenance
+        shell: bash
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}/ubuntu-20.04:latest
+        run: |
+          # ${{ github.action }}
+          echo "Verifying provenance for $IMAGE"
+          # Cosign keyless verification (GitHub OIDC)
+          cosign verify-attestation \
+            --type slsaprovenance \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/build.yml@refs/heads/main" \
+            $IMAGE
+          echo "Provenance verified successfully"
+
+  build:
+    needs: verify-image
+    name: Build core-image-minimal (${{ matrix.template }})
+    runs-on: [self-hosted,linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        template: ${{ fromJson(inputs.template == 'all' && '["machine-qemux86-64","machine-qemuarm64"]' || format('["{0}"]', inputs.template)) }}
+    container:
+      image: ghcr.io/${{ github.repository }}/ubuntu-20.04:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --userns=host --user=1001:1001
+    permissions:
+      packages: read
+    steps:
+      - name: Install curl and cosign
+        run: |
+          # ${{ github.action }}
+          sudo apt-get update && apt-get install -y curl
+          mkdir -p /tmp/tools && \
+          curl -sSL https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 -o /tmp/tools/cosign && \
+          chmod +x /tmp/tools/cosign && echo "/tmp/tools" >> "$GITHUB_PATH"
+
+      - name: Login to GHCR (inside container)
+        run: |
+          # ${{ github.action }}
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Verify provenance of this container
+        run: |
+          # ${{ github.action }}
+          cosign verify-attestation \
+            --type slsaprovenance \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/build.yml@refs/heads/main" \
+            ghcr.io/${{ github.repository }}/ubuntu-20.04:latest
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          clean: false
+          fetch-depth: 1
+          ref: ${{ github.ref_name }}
+
+      - name: Print username and write env table to step summary
+        shell: bash
+        run: |
+          # ${{ github.action }}
+          # Print current username to the job log
+          echo "Current user: $(whoami)"
+          # Ensure GITHUB_STEP_SUMMARY is available
+          if [ -z "${GITHUB_STEP_SUMMARY:-}" ]; then
+            echo "GITHUB_STEP_SUMMARY is not set; skipping summary write."
+            exit 0
+          fi
+          SUMMARY_PATH="$GITHUB_STEP_SUMMARY"
+          # Write the exact table heading requested and the Markdown separator row
+          printf '%s\n' "| key | value |" >> "$SUMMARY_PATH"
+          printf '%s\n' "|---|---|" >> "$SUMMARY_PATH"
+          # Helper: read env, sort by key, sanitize values (collapse newlines, escape pipes)
+          env | sort | while IFS='=' read -r key value; do
+            # collapse newlines into spaces and escape pipe characters
+            safe_value="$(printf '%s' "$value" | tr '\n' ' ' | sed 's/|/\\|/g')"
+            printf '| %s | %s |\n' "$key" "$safe_value" >> "$SUMMARY_PATH"
+          done
+          echo "Environment table appended to $SUMMARY_PATH"
+
+      - name: Build image and optionally draft release
+        if: ${{ success() || failure() }}
+        uses: ./.github/actions/core-image-build
+        with:
+          workspace: ${{ github.workspace }}
+          manifest_uri: ${{ github.server_url }}/${{ github.repository }}
+          manifest_file: manifests/default.xml
+          manifest_branch: ${{ github.ref_name }}
+          target: core-image-minimal
+          template: ${{ matrix.template }}
+          release_tag: ${{ inputs.release_tag }}
+          release_title: ${{ inputs.release_title }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

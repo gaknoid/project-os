@@ -1,0 +1,66 @@
+name: WSL Bitbake core-image-minimal
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+      name: WSL Bitbake core-image-minimal
+      runs-on: [self-hosted,windows]
+      defaults:
+        run:
+          shell: pwsh
+      env:
+        WSL_DISTRO: Ubuntu-24.04
+
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v6
+          with:
+            clean: ${{ runner.environment != 'self-hosted' }}
+            fetch-depth: 1
+            ref: ${{ github.ref_name }}
+
+        - name: WSL setup
+          if: ${{ env.WSL_DISTRO }}
+          uses: Vampire/setup-wsl@v7
+          with:
+            distribution: ${{ env.WSL_DISTRO }}
+            set-as-default: 'true'
+            update: 'true'
+            wsl-conf: |
+              [boot]
+              systemd=true
+              [time]
+              useWindowsTimezone=true
+            additional-packages: >
+              bash build-essential ca-certificates chrpath cpio curl debianutils diffstat
+              file gawk git iputils-ping lz4 locales python3 python3-git python3-jinja2
+              python3-pexpect python3-pip python3-subunit socat sudo texinfo unzip wget
+              xterm xz-utils zstd gh repo
+
+        - name: WSL post setup
+          shell: wsl-bash {0}
+          run: |
+            : ${{ github.action }}
+            useradd -U -m -G docker user || true
+
+        - name: WSL bash user helper
+          uses: Vampire/setup-wsl@v7
+          with:
+              wsl-shell-command: bash -c "sudo -u user bash --noprofile --norc -euo pipefail '{0}'"
+
+        - name: Repo Sync
+          uses: ./.github/actions/repo-sync
+          with:
+            shell: wsl-bash {0}
