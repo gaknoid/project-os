@@ -1,0 +1,34 @@
+name: Deploy Release
+description: Collect Yocto build artifacts and create a draft GitHub release
+
+inputs:
+  workspace:
+    description: Workspace directory to collect build artifacts from
+    required: false
+    default: ${{ github.workspace }}
+  target:
+    description: BitBake image target
+    required: true
+  template:
+    description: Template name under layers/meta-project/conf/templates
+    required: true
+  release_tag:
+    description: Git tag to create for the draft release
+    required: true
+  release_title:
+    description: Optional release title
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Create draft release from build artifacts
+      shell: bash
+      env:
+        WORKSPACE: ${{ inputs.workspace }}
+        BITBAKE_TARGET: ${{ inputs.target }}
+        BITBAKE_TEMPLATE: ${{ inputs.template }}
+        RELEASE_TAG: ${{ inputs.release_tag }}
+        RELEASE_TITLE: ${{ inputs.release_title }}
+      run: $GITHUB_ACTION_PATH/action.sh

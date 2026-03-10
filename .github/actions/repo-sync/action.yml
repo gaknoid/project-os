@@ -1,0 +1,38 @@
+name: Repo Sync
+description: Google repo tool, initialize with manifest and sync upstream layers
+
+inputs:
+  shell:
+    description: Step shell
+    required: false
+    default: bash
+  workspace:
+    description: Workspace directory to run repo init and sync in
+    required: false
+    default: ${{ github.workspace }}
+  manifest_uri:
+    description: URI of the manifest repository
+    required: false
+    default: ${{ github.server_url }}/${{ github.repository }}
+  manifest_branch:
+    description: Branch to check out in the manifest repository
+    required: false
+    default: ${{ github.ref }}
+  manifest_file:
+    description: Manifest file path (e.g., manifests/default.xml)
+    required: false
+    default: manifests/default.xml
+
+runs:
+  using: composite
+  steps:
+    - name: Run repo sync
+      shell: ${{ inputs.shell }}
+      run: |
+        : ${{ github.action }}
+        set -euxo pipefail
+        wslpath -u '${{ inputs.workspace }}'
+        [[ -n "$(command -v wslpath)" ]] && workspace="$(wslpath -u '${{ inputs.workspace }}')" || workspace="${{ inputs.workspace }}"
+        cd "$workspace"
+        repo init -u "${{ inputs.manifest_uri }}" -b "${{ inputs.manifest_branch }}" -m "${{ inputs.manifest_file }}"
+        repo sync --no-clone-bundle --no-tags -j"$(nproc)"

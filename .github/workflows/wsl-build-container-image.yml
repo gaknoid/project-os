@@ -1,0 +1,246 @@
+name: WSL Build and push containers to GHCR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+      name: Build and push ubuntu-${{ matrix.ubuntu_version }}
+      runs-on: [self-hosted,windows]
+      env:
+        WSL_DISTRO: Ubuntu-24.04
+        USER_NAME: user
+        USER_UID: '1001'
+        USER_GID: '1001'
+
+      strategy:
+        fail-fast: false
+        matrix:
+          ubuntu_version: ['20.04', '22.04', '24.04']
+
+      steps:
+        - name: Checkout repository
+          uses: actions/checkout@v6
+          with:
+            clean: ${{ runner.environment != 'self-hosted' }}
+            fetch-depth: 1
+            ref: ${{ github.ref_name }}
+
+        - name: Print username and write env table to step summary
+          shell: pwsh
+          run: |
+            # ${{ github.action }}
+            # Print current username to the job log
+            $username = $env:USERNAME
+            Write-Host "Current user: $username"
+
+            # Ensure GITHUB_STEP_SUMMARY is available
+            $summaryPath = $env:GITHUB_STEP_SUMMARY
+            if (-not $summaryPath) {
+              Write-Host "GITHUB_STEP_SUMMARY is not set; skipping summary write."
+              exit 0
+            }
+
+            # Write a small heading and the username to the step summary
+            Add-Content -Path $summaryPath -Value "### Current user"
+            Add-Content -Path $summaryPath -Value ""
+            Add-Content -Path $summaryPath -Value $username
+            Add-Content -Path $summaryPath -Value ""
+
+            # Table header required by the user
+            $header = "| key | value |`n|---|---|"
+            Add-Content -Path $summaryPath -Value $header
+
+            # Helper to sanitize values so the Markdown table stays valid:
+            # - replace pipe characters with escaped pipe (\|)
+            # - collapse newlines into spaces
+            function Sanitize([string]$s) {
+              if ($null -eq $s) { return "" }
+              $noNewlines = [regex]::Replace($s, '\r\n?|\n', ' ')
+              return ($noNewlines -replace '\|','\\|')
+            }
+
+            # Append sorted environment variables as table rows
+            Get-ChildItem Env: |
+              Sort-Object Name |
+              ForEach-Object {
+                $k = Sanitize $_.Name
+                $v = Sanitize $_.Value
+                Add-Content -Path $summaryPath -Value ("| {0} | {1} |" -f $k, $v)
+              }
+
+            Write-Host "Environment table appended to $summaryPath"
+
+        - name: WSL Remove distributions (keep one)
+          shell: pwsh
+          run: |
+            # ${{ github.action }}
+
+            # Read the distro to keep from the environment (set ${{ env.WSL_DISTRO }})
+            $keep = 'NONE'
+
+            if (-not $keep) {
+              Write-Host "Environment variable WSL_DISTRO is not set. Aborting."
+              exit 1
+            }
+
+            Write-Host "Will keep WSL distribution: $keep"
+
+            # Get list of installed WSL distributions and exclude the one to keep
+            $distros = (wsl --list --quiet) -split '\r?\n' |
+                      ForEach-Object { $_.Trim() } |
+                      Where-Object { $_ -ne "" -and $_ -ne $keep }
+
+            if (-not $distros) {
+              Write-Host "No distributions to remove. Remaining distributions:"
+              wsl --list --all
+              exit 0
+            }
+
+            Write-Host "Distributions to remove: $($distros -join ', ')"
+
+            foreach ($d in $distros) {
+              try {
+                Write-Host "Terminating: $d"
+                # remove BOM, NULs, zero-width spaces, trim whitespace
+                $clean = $d -replace "`0", '' -replace '\uFEFF', '' -replace '\u200B', ''
+                $clean = $clean.Trim()
+                & 'wsl.exe' '--terminate' $clean
+              } catch {
+                Write-Host ("Terminate command for {0} returned an error (continuing): {1}" -f $d, $_)
+              }
+
+              try {
+                Write-Host "Unregistering: $d"
+                # remove BOM, NULs, zero-width spaces, trim whitespace
+                $clean = $d -replace "`0", '' -replace '\uFEFF', '' -replace '\u200B', ''
+                $clean = $clean.Trim()
+                & 'wsl.exe' '--unregister' $clean
+                Write-Host "Successfully unregistered: $d"
+              } catch {
+                Write-Host ("Failed to unregister {0}: {1}" -f $d, $_)
+              }
+            }
+
+            Write-Host "Final list of WSL distributions:"
+            wsl --list --all
+
+            exit 0
+
+        - name: WSL setup
+          if: ${{ env.WSL_DISTRO }}
+          uses: Vampire/setup-wsl@v7
+          with:
+            distribution: ${{ env.WSL_DISTRO }}
+            update: 'true'
+            wsl-shell-user: ${{ env.USER_NAME }}
+            additional-packages: >
+              gh repo docker.io docker-buildx docker-compose-v2
+
+        - name: WSL post setup
+          shell: wsl-bash {0}
+          run: |
+            : ${{ github.action }}
+            # sudo useradd -U -m ${{ env.USER_NAME }} || true
+            sudo usermod -aG docker ${{ env.USER_NAME }} || true
+
+        # - name: WSL bash user helper
+        #   uses: Vampire/setup-wsl@v7
+        #   with:
+        #       wsl-shell-command: bash -c "sudo -u ${{ env.USER_NAME }} bash --noprofile --norc -euo pipefail '{0}'"
+
+        - name: Login to GHCR
+          if: success()
+          shell: wsl-bash {0}
+          run: |
+            : ${{ github.action }}
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+        - name: Build container image
+          if: success()
+          shell: wsl-bash {0}
+          run: |
+            : ${{ github.action }}
+
+            # Ensure a buildx builder exists and is bootstrapped
+            docker buildx create --name buildx-builder --use || true
+            docker buildx inspect --bootstrap
+
+            # Build with buildx and load the image into the local Docker daemon
+            docker buildx build \
+              --file .github/workflows/build-container-image.dockerfile \
+              --build-arg UBUNTU_VERSION=${{ matrix.ubuntu_version }} \
+              --build-arg USER_UID=${{ env.USER_UID }} \
+              --build-arg USER_GID=${{ env.USER_GID }} \
+              --tag ghcr.io/${{ github.repository }}/ubuntu-${{ matrix.ubuntu_version }}:latest \
+              --load \
+              .
+
+            # Show buildx builders and caches before cleanup
+            echo "Buildx builders:"
+            docker buildx ls
+            echo "Buildx cache usage (summary):"
+            docker buildx du || true
+
+            # Clean buildx caches and builder caches
+            echo "Pruning buildx build cache (all) and builder cache"
+            docker buildx prune --all --force
+            docker builder prune --all --force
+
+            # Optionally remove the named builder (safe to ignore errors)
+            echo "Removing buildx builder 'buildx-builder' if present"
+            docker buildx rm buildx-builder || true
+
+            # Show remaining builders and images
+            echo "Remaining buildx builders:"
+            docker buildx ls || true
+
+            echo "Remaining images:"
+            docker image ls
+
+        - name: Push container image
+          if: success()
+          shell: wsl-bash {0}
+          run: |
+            : ${{ github.action }}
+            echo "Remaining images:"
+            docker image ls
+            echo "Push container"
+            docker push ghcr.io/${{ github.repository }}/ubuntu-${{ matrix.ubuntu_version }}:latest
+
+        # - name: Attest build provenance
+        #   if: success()
+        #   uses: actions/attest-build-provenance@v3
+        #   with:
+        #     subject-name: ghcr.io/${{ github.repository }}/ubuntu-${{ matrix.ubuntu_version }}:latest
+        #     subject-digest: ${{ steps.push.outputs.digest }}
+        #     push-to-registry: true
+
+        # - name: Remove untagged container images
+        #   if: success()
+        #   uses: actions/delete-package-versions@v5
+        #   with:
+        #     package-name: ${{ github.repository }}
+        #     package-type: container
+        #     min-versions-to-keep: 1
+        #     token: ${{ secrets.GITHUB_TOKEN }}
+
+        - name: Logout from GHCR
+          if: success()
+          shell: wsl-bash {0}
+          run: |
+            : ${{ github.action }}
+            pwd
+
+            # Logout
+            docker logout ghcr.io

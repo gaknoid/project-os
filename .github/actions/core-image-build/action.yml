@@ -1,0 +1,63 @@
+name: Build Core Image
+description: Initialize layers, build a BitBake target, and optionally draft a release.
+inputs:
+  workspace:
+    description: Workspace root path.
+    required: false
+    default: ${{ github.workspace }}
+  manifest_uri:
+    description: Manifest repository URI.
+    required: true
+  manifest_file:
+    description: Manifest file path.
+    required: true
+  manifest_branch:
+    description: Manifest branch.
+    required: true
+  target:
+    description: BitBake target to build.
+    required: true
+  template:
+    description: Template name under layers/meta-project/conf/templates.
+    required: true
+  release_tag:
+    description: Optional release tag. Empty skips release.
+    required: false
+    default: ""
+  release_title:
+    description: Optional release title.
+    required: false
+    default: ""
+  github_token:
+    description: GitHub token used for release publication.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Initialize and sync upstream layers
+      uses: ./.github/actions/repo-sync
+      with:
+        workspace: ${{ inputs.workspace }}
+        manifest_uri: ${{ inputs.manifest_uri }}
+        manifest_file: ${{ inputs.manifest_file }}
+        manifest_branch: ${{ inputs.manifest_branch }}
+
+    - name: Build ${{ inputs.target }}
+      uses: ./.github/actions/core-image-bitbake
+      with:
+        workspace: ${{ inputs.workspace }}
+        target: ${{ inputs.target }}
+        template: ${{ inputs.template }}
+
+    - name: Draft release from build artifacts
+      if: ${{ inputs.release_tag != '' && inputs.template != 'all' }}
+      uses: ./.github/actions/deploy-release
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+      with:
+        workspace: ${{ inputs.workspace }}
+        target: ${{ inputs.target }}
+        template: ${{ inputs.template }}
+        release_tag: ${{ inputs.release_tag }}
+        release_title: ${{ inputs.release_title }}
